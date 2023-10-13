@@ -1,17 +1,16 @@
-
 ////////////////////////////////////////////////////////////////////////
 // GPU version of Monte Carlo algorithm using NVIDIA's CURAND library
 ////////////////////////////////////////////////////////////////////////
 
 #include <cuda.h>
-#include <curand.h>
+#include <curand_kernel.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "helper_cuda.h"
+#include <iostream>
 
-#define __VER__ 1
+#include "helper_cuda.h"
 
 ////////////////////////////////////////////////////////////////////////
 // CUDA global constants
@@ -24,35 +23,28 @@ __constant__ float T, r, sigma, rho, alpha, dt, con1, con2;
 // kernel routine
 ////////////////////////////////////////////////////////////////////////
 
-__global__ void pathcalc(float *d_z, float *d_v) {
+__global__ void setup_kernel(curandState *state) {
+  int id = threadIdx.x + blockIdx.x * blockDim.x;
+  curand_init(1234, id, 0, &state[id]);
+}
+
+__global__ void pathcalc(float *d_v, curandState *state) {
   float s1, s2, y1, y2, payoff;
-  int ind;
 
-  // move array pointers to correct position
+  // RNG initialisation with skipahead
 
-#if __VER__ == 1
-  ind = threadIdx.x + 2 * N * blockIdx.x * blockDim.x;
-#elif __VER__ == 2
-  ind = 2 * N * threadIdx.x + 2 * N * blockIdx.x * blockDim.x;
-#endif
+  int id = threadIdx.x + blockIdx.x * blockDim.x;
+  curandState localState = state[id];
+
   // path calculation
 
   s1 = 1.0f;
   s2 = 1.0f;
 
   for (int n = 0; n < N; n++) {
-    y1 = d_z[ind];
-#if __VER__ == 1
-    ind += blockDim.x;  // shift pointer to next element
-#elif __VER__ == 2
-    ind += 1;
-#endif
-    y2 = rho * y1 + alpha * d_z[ind];
-#if __VER__ == 1
-    ind += blockDim.x;  // shift pointer to next element
-#elif __VER__ == 2
-    ind += 1;
-#endif
+    y1 = curand_normal(&localState);
+    y2 = rho * y1 + alpha * curand_normal(&localState);
+
     s1 = s1 * (con1 + con2 * y1);
     s2 = s2 * (con1 + con2 * y2);
   }
@@ -64,7 +56,6 @@ __global__ void pathcalc(float *d_z, float *d_v) {
 
   d_v[threadIdx.x + blockIdx.x * blockDim.x] = payoff;
 }
-
 ////////////////////////////////////////////////////////////////////////
 // Main program
 ////////////////////////////////////////////////////////////////////////
@@ -72,8 +63,11 @@ __global__ void pathcalc(float *d_z, float *d_v) {
 int main(int argc, const char **argv) {
   int NPATH = 9600000, h_N = 100;
   float h_T, h_r, h_sigma, h_rho, h_alpha, h_dt, h_con1, h_con2;
-  float *h_v, *d_v, *d_z;
+  float *h_v, *d_v;
   double sum1, sum2;
+  curandState *state;
+  int totalThreads = NPATH;
+  cudaMalloc((void **)&state, totalThreads * sizeof(curandState));
 
   // initialise card
 
@@ -89,9 +83,7 @@ int main(int argc, const char **argv) {
   // allocate memory on host and device
 
   h_v = (float *)malloc(sizeof(float) * NPATH);
-
   checkCudaErrors(cudaMalloc((void **)&d_v, sizeof(float) * NPATH));
-  checkCudaErrors(cudaMalloc((void **)&d_z, sizeof(float) * 2 * h_N * NPATH));
 
   // define constants and transfer to GPU
 
@@ -114,66 +106,59 @@ int main(int argc, const char **argv) {
   checkCudaErrors(cudaMemcpyToSymbol(con1, &h_con1, sizeof(h_con1)));
   checkCudaErrors(cudaMemcpyToSymbol(con2, &h_con2, sizeof(h_con2)));
 
-  // random number generation
-
-  curandGenerator_t gen;
-  checkCudaErrors(curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_DEFAULT));
-  checkCudaErrors(curandSetPseudoRandomGeneratorSeed(gen, 1234ULL));
-
-  cudaEventRecord(start);
-  checkCudaErrors(curandGenerateNormal(gen, d_z, 2 * h_N * NPATH, 0.0f, 1.0f));
-  cudaEventRecord(stop);
-
-  cudaEventSynchronize(stop);
-  cudaEventElapsedTime(&milli, start, stop);
-
-  printf("CURAND normal RNG  execution time (ms): %f,  samples/sec: %e \n",
-         milli, 2.0 * h_N * NPATH / (0.001 * milli));
-
   // execute kernel and time it
-
+  int numBlocks;
+  int blockSize = 1024;
   cudaEventRecord(start);
+  int device;
+  cudaDeviceProp prop;
+  int activeWarps;
+  int maxWarps;
+  cudaGetDevice(&device);
+  cudaGetDeviceProperties(&prop, device);
+  cudaOccupancyMaxActiveBlocksPerMultiprocessor(&numBlocks, setup_kernel,
+                                                blockSize, 0);
+  activeWarps = numBlocks * blockSize / prop.warpSize;
+  maxWarps = prop.maxThreadsPerMultiProcessor / prop.warpSize;
+  std::cout << "Occupancy: " << (double)activeWarps / maxWarps * 100 << "%"
+            << std::endl;
+  gridSize = (arrayCount + blockSize - 1) / blockSize;
+  MyKernel<<<gridSize, blockSize>>>(array, arrayCount);
+  cudaDeviceSynchronize();
 
-  pathcalc<<<NPATH / 128, 128>>>(d_z, d_v);
-  getLastCudaError("pathcalc execution failed\n");
+  // setup_kernel<<<numBlocks, optimalBlockSize>>>(state);
+  // pathcalc<<<numBlocks, optimalBlockSize>>>(d_v, state);
+  // getLastCudaError("pathcalc execution failed\n");
 
-  cudaEventRecord(stop);
-  cudaEventSynchronize(stop);
-  cudaEventElapsedTime(&milli, start, stop);
+  // cudaEventRecord(stop);
+  // cudaEventSynchronize(stop);
+  // cudaEventElapsedTime(&milli, start, stop);
 
-  printf("Monte Carlo kernel execution time (ms): %f \n", milli);
+  // printf("Monte Carlo kernel execution time (ms): %f \n", milli);
 
-  // copy back results
+  // // copy back results
 
-  checkCudaErrors(
-      cudaMemcpy(h_v, d_v, sizeof(float) * NPATH, cudaMemcpyDeviceToHost));
+  // checkCudaErrors(
+  //     cudaMemcpy(h_v, d_v, sizeof(float) * NPATH, cudaMemcpyDeviceToHost));
 
-  float *h_z = (float *)malloc(sizeof(float) * 2 * h_N * NPATH);
-  checkCudaErrors(cudaMemcpy(h_z, d_z, sizeof(float) * 2 * h_N * NPATH,
-                             cudaMemcpyDeviceToHost));
+  // // compute average
 
-  // compute average
+  // sum1 = 0.0;
+  // sum2 = 0.0;
+  // for (int i = 0; i < NPATH; i++) {
+  //   sum1 += h_v[i];
+  //   sum2 += h_v[i] * h_v[i];
+  // }
 
-  sum1 = 0.0;
-  sum2 = 0.0;
-  for (int i = 0; i < NPATH; i++) {
-    sum1 += h_v[i];
-    sum2 += h_v[i] * h_v[i];
-  }
+  // printf("\nAverage value and standard deviation of error  = %13.8f
+  // %13.8f\n\n",
+  //        sum1 / NPATH,
+  //        sqrt((sum2 / NPATH - (sum1 / NPATH) * (sum1 / NPATH)) / NPATH));
 
-  printf("\nAverage value and standard deviation of error  = %13.8f %13.8f\n\n",
-         sum1 / NPATH,
-         sqrt((sum2 / NPATH - (sum1 / NPATH) * (sum1 / NPATH)) / NPATH));
+  // // Release memory and exit cleanly
 
-  // Tidy up library
-
-  checkCudaErrors(curandDestroyGenerator(gen));
-
-  // Release memory and exit cleanly
-  free(h_z);
   free(h_v);
   checkCudaErrors(cudaFree(d_v));
-  checkCudaErrors(cudaFree(d_z));
 
   // CUDA exit -- needed to flush printf write buffer
 
