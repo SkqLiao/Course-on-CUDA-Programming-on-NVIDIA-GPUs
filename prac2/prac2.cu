@@ -11,7 +11,7 @@
 
 #include "helper_cuda.h"
 
-#define __VER__ 1
+#define __VER__ 2
 
 ////////////////////////////////////////////////////////////////////////
 // CUDA global constants

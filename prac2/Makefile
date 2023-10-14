@@ -7,7 +7,7 @@ NVCCFLAGS	:= -lineinfo -arch=sm_70 --ptxas-options=-v --use_fast_math
 prac2:	prac2.cu Makefile
 	nvcc prac2.cu -o prac2 $(INC) $(NVCCFLAGS) $(LIB)
 
-prac2_device:	prac2_device.cu Makefile
+prac2_device: prac2_device.cu Makefile
 	nvcc prac2_device.cu -o prac2_device $(INC) $(NVCCFLAGS) $(LIB)
 
 prac2_new:	prac2_new.cu Makefile

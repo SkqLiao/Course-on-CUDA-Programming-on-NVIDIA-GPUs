@@ -67,7 +67,7 @@ int main(int argc, const char **argv) {
   checkCudaErrors(cudaMemcpyToSymbol(a, &h_a, sizeof(h_a)));
   checkCudaErrors(cudaMemcpyToSymbol(b, &h_b, sizeof(h_b)));
   checkCudaErrors(cudaMemcpyToSymbol(c, &h_c, sizeof(h_c)));
-  int type = 3;
+  int type = 4;
   printf("a = %f, b = %f, c = %f\n", h_a, h_b, h_c);
 
   cudaEvent_t start, stop;
@@ -104,6 +104,18 @@ int main(int argc, const char **argv) {
         thrust::device, d_z, d_z + h_N * h_n, f, 0.0, thrust::plus<float>());
     printf("sum = %lf\n", h_sum / (h_N * h_n));
     getTime(start, stop, "Method 3");
+  }
+  if (type == 4) {
+    cudaEventRecord(start);
+    double h_sum = 0;
+    float *h_z = (float *)malloc(sizeof(float) * h_N * h_n);
+    checkCudaErrors(cudaMemcpy(h_z, d_z, sizeof(float) * h_N * h_n,
+                               cudaMemcpyDeviceToHost));
+    for (int i = 0; i < h_N * h_n; i++) {
+      h_sum += h_a * h_z[i] * h_z[i] + h_b * h_z[i] + h_c;
+    }
+    printf("sum = %lf\n", h_sum / (h_N * h_n));
+    getTime(start, stop, "Method 4");
   }
   checkCudaErrors(curandDestroyGenerator(gen));
   checkCudaErrors(cudaFree(d_z));

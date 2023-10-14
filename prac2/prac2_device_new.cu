@@ -107,55 +107,39 @@ int main(int argc, const char **argv) {
   checkCudaErrors(cudaMemcpyToSymbol(con2, &h_con2, sizeof(h_con2)));
 
   // execute kernel and time it
-  int numBlocks;
-  int blockSize = 1024;
   cudaEventRecord(start);
-  int device;
-  cudaDeviceProp prop;
-  int activeWarps;
-  int maxWarps;
-  cudaGetDevice(&device);
-  cudaGetDeviceProperties(&prop, device);
-  cudaOccupancyMaxActiveBlocksPerMultiprocessor(&numBlocks, setup_kernel,
-                                                blockSize, 0);
-  activeWarps = numBlocks * blockSize / prop.warpSize;
-  maxWarps = prop.maxThreadsPerMultiProcessor / prop.warpSize;
-  std::cout << "Occupancy: " << (double)activeWarps / maxWarps * 100 << "%"
-            << std::endl;
-  gridSize = (arrayCount + blockSize - 1) / blockSize;
-  MyKernel<<<gridSize, blockSize>>>(array, arrayCount);
-  cudaDeviceSynchronize();
+  int blockSize = 64;
+  int gridSize = NPATH / blockSize;
+  setup_kernel<<<gridSize, blockSize>>>(state);
+  pathcalc<<<gridSize, blockSize>>>(d_v, state);
+  getLastCudaError("pathcalc execution failed\n");
 
-  // setup_kernel<<<numBlocks, optimalBlockSize>>>(state);
-  // pathcalc<<<numBlocks, optimalBlockSize>>>(d_v, state);
-  // getLastCudaError("pathcalc execution failed\n");
+  cudaEventRecord(stop);
+  cudaEventSynchronize(stop);
+  cudaEventElapsedTime(&milli, start, stop);
 
-  // cudaEventRecord(stop);
-  // cudaEventSynchronize(stop);
-  // cudaEventElapsedTime(&milli, start, stop);
+  printf("Monte Carlo kernel execution time (ms): %f \n", milli);
 
-  // printf("Monte Carlo kernel execution time (ms): %f \n", milli);
+  // copy back results
 
-  // // copy back results
+  checkCudaErrors(
+      cudaMemcpy(h_v, d_v, sizeof(float) * NPATH, cudaMemcpyDeviceToHost));
 
-  // checkCudaErrors(
-  //     cudaMemcpy(h_v, d_v, sizeof(float) * NPATH, cudaMemcpyDeviceToHost));
+  // compute average
 
-  // // compute average
+  sum1 = 0.0;
+  sum2 = 0.0;
+  for (int i = 0; i < NPATH; i++) {
+    sum1 += h_v[i];
+    sum2 += h_v[i] * h_v[i];
+  }
 
-  // sum1 = 0.0;
-  // sum2 = 0.0;
-  // for (int i = 0; i < NPATH; i++) {
-  //   sum1 += h_v[i];
-  //   sum2 += h_v[i] * h_v[i];
-  // }
+  printf(
+      "\nAverage value and standard deviation of error  = %13.8f %13.8f\n\n ",
+      sum1 / NPATH,
+      sqrt((sum2 / NPATH - (sum1 / NPATH) * (sum1 / NPATH)) / NPATH));
 
-  // printf("\nAverage value and standard deviation of error  = %13.8f
-  // %13.8f\n\n",
-  //        sum1 / NPATH,
-  //        sqrt((sum2 / NPATH - (sum1 / NPATH) * (sum1 / NPATH)) / NPATH));
-
-  // // Release memory and exit cleanly
+  // Release memory and exit cleanly
 
   free(h_v);
   checkCudaErrors(cudaFree(d_v));
