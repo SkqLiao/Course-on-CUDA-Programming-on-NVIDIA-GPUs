@@ -7,5 +7,5 @@
 
 ## Progress
 
-- course: 2/10
-- practice: 1/12
+- course: 10/10
+- practice: 7/12

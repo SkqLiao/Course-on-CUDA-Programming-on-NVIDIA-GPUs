@@ -67,7 +67,7 @@ int main(int argc, const char **argv) {
   checkCudaErrors(cudaMemcpyToSymbol(a, &h_a, sizeof(h_a)));
   checkCudaErrors(cudaMemcpyToSymbol(b, &h_b, sizeof(h_b)));
   checkCudaErrors(cudaMemcpyToSymbol(c, &h_c, sizeof(h_c)));
-  int type = 4;
+  int type = 3;
   printf("a = %f, b = %f, c = %f\n", h_a, h_b, h_c);
 
   cudaEvent_t start, stop;

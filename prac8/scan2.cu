@@ -10,7 +10,7 @@
 // CPU routine
 ///////////////////////////////////////////////////////////////////////////////
 
-void scan_gold(float *odata, float *idata, const unsigned int len) {
+void scan_gold(double *odata, double *idata, const unsigned int len) {
   odata[0] = 0;
   for (int i = 1; i < len; i++) odata[i] = idata[i - 1] + odata[i - 1];
 }
@@ -19,17 +19,22 @@ void scan_gold(float *odata, float *idata, const unsigned int len) {
 // GPU routine
 ///////////////////////////////////////////////////////////////////////////////
 
-__global__ void scan(float *g_odata, float *g_idata) {
+__device__ volatile int current_block = 0;
+__device__ volatile double current_sum = 0.0f;
+
+__global__ void scan(int N, double *g_odata, double *g_idata) {
   // Dynamically allocated shared memory for scan kernels
 
-  extern __shared__ float tmp[];
+  extern __shared__ double tmp[];
 
-  float temp;
+  double temp;
   int tid = threadIdx.x;
+  int rid = tid + blockDim.x * blockIdx.x;
 
+  if (rid >= N) return;
   // read input into shared memory
 
-  temp = g_idata[tid];
+  temp = g_idata[rid];
   tmp[tid] = temp;
 
   // scan up the tree
@@ -48,12 +53,20 @@ __global__ void scan(float *g_odata, float *g_idata) {
 
   __syncthreads();
 
-  if (tid == 0)
-    temp = 0.0f;
-  else
-    temp = tmp[tid - 1];
+  temp = tmp[tid];
 
-  g_odata[tid] = temp;
+  __syncthreads();
+
+  do {
+  } while (current_block < blockIdx.x);
+  temp += current_sum;
+  __threadfence();
+  if (tid == blockDim.x - 1) {
+    current_sum += tmp[blockDim.x - 1];
+    current_block++;
+  }
+
+  if (rid < N) g_odata[rid + 1] = temp;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -61,29 +74,31 @@ __global__ void scan(float *g_odata, float *g_idata) {
 ////////////////////////////////////////////////////////////////////////////////
 
 int main(int argc, const char **argv) {
-  int num_elements, mem_size, shared_mem_size;
+  int num_elements, num_threads, num_blocks, mem_size, shared_mem_size;
 
-  float *h_data, *reference;
-  float *d_idata, *d_odata;
+  double *h_data, *reference;
+  double *d_idata, *d_odata;
 
   // initialise card
 
   findCudaDevice(argc, argv);
 
-  num_elements = 512;
-  mem_size = sizeof(float) * num_elements;
+  num_elements = 100000000;
+  num_threads = 1024;
+  num_blocks = (num_elements + num_threads - 1) / num_threads;
+  mem_size = sizeof(double) * num_elements;
 
   // allocate host memory to store the input data
   // and initialize to integer values between 0 and 1000
 
-  h_data = (float *)malloc(mem_size);
+  h_data = (double *)malloc(mem_size);
 
   for (int i = 0; i < num_elements; i++)
-    h_data[i] = floorf(1000 * (rand() / (float)RAND_MAX));
+    h_data[i] = floorf(1000 * (rand() / (double)RAND_MAX));
 
   // compute reference solution
 
-  reference = (float *)malloc(mem_size);
+  reference = (double *)malloc(mem_size);
   scan_gold(reference, h_data, num_elements);
 
   // allocate device memory input and output arrays
@@ -98,8 +113,22 @@ int main(int argc, const char **argv) {
 
   // execute the kernel
 
-  shared_mem_size = sizeof(float) * (num_elements + 1);
-  scan<<<1, num_elements, shared_mem_size>>>(d_odata, d_idata);
+  shared_mem_size = sizeof(double) * num_threads;
+
+  float milli;
+  cudaEvent_t start, stop;
+  cudaEventCreate(&start);
+  cudaEventCreate(&stop);
+  cudaEventRecord(start);
+
+  scan<<<num_blocks, num_threads, shared_mem_size>>>(num_elements, d_odata,
+                                                     d_idata);
+
+  cudaEventRecord(stop);
+  cudaEventSynchronize(stop);
+  cudaEventElapsedTime(&milli, start, stop);
+  printf("\nscan2: %.1f (ms) \n", milli);
+
   getLastCudaError("scan kernel execution failed");
 
   // copy result from device to host
@@ -109,10 +138,10 @@ int main(int argc, const char **argv) {
 
   // check results
 
-  float err = 0.0;
+  double err = 0.0;
   for (int i = 0; i < num_elements; i++) {
     err += (h_data[i] - reference[i]) * (h_data[i] - reference[i]);
-    //    printf(" %f %f \n",h_data[i], reference[i]);
+    // printf("%d %f %f \n", i, h_data[i], reference[i]);
   }
   printf("rms scan error  = %f\n", sqrt(err / num_elements));
 
